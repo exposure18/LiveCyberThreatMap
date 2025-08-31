@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Global Cyber Threat Map</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #0d1117;
+      color: #c9d1d9;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    #stats-panel {
+      position: absolute;
+      bottom: 1rem;
+      right: 1rem;
+      background: rgba(14, 18, 25, 0.8);
+      backdrop-filter: blur(5px);
+      padding: 1.5rem;
+      border-radius: 12px;
+      max-width: 300px;
+      border: 1px solid #30363d;
+      z-index: 1000;
+    }
+    #message-log {
+      position: absolute;
+      bottom: 1rem;
+      left: 1rem;
+      background: rgba(14, 18, 25, 0.8);
+      backdrop-filter: blur(5px);
+      padding: 1rem;
+      border-radius: 12px;
+      max-width: 450px;
+      height: 200px;
+      overflow-y: scroll;
+      border: 1px solid #30363d;
+      z-index: 1000;
+      font-size: 0.8rem;
+      line-height: 1.4;
+      display: flex;
+      flex-direction: column-reverse;
+    }
+    .message-log-item {
+      margin-top: 0.5rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid #30363d;
+    }
+    .log-timestamp {
+      color: #7d8590;
+      font-size: 0.7rem;
+    }
+  </style>
+</head>
+<body>
+  <div id="stats-panel">
+    <h2 class="text-lg font-bold text-blue-400">Threat Statistics</h2>
+    <div id="stats-content" class="mt-2 text-sm">
+      <p>Active Attacks: <span id="active-attacks">0</span></p>
+      <p>Total Attacks: <span id="total-attacks">0</span></p>
+    </div>
+  </div>
+
+  <div id="message-log">
+    <p class="font-bold text-blue-400 mb-2">Threat Log</p>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    window.onload = function () {
+      const EARTH_RADIUS = 200;
+      const ATTACK_DURATION = 5000;
+
+      const OTX_API_KEY = "40b092a5e96f4e33b4377ea485ae4d0396f37bae1e25ff1d065c3494bf5ca3e5";
+      const OTX_URL = "https://otx.alienvault.com/api/v1/pulses/subscribed";
+
+      let scene, camera, renderer, globe;
+      let attacks = [];
+      let totalAttacksCount = 0;
+      let totalAttacksElement, activeAttacksElement, messageLogElement;
+
+      const THREAT_TYPES = ['DDoS Attack', 'Phishing Attempt', 'Malware Injection', 'Botnet Activity', 'Port Scan'];
+
+      function latLonToVector3(lat, lon, radius) {
+        const phi = (90 - lat) * (Math.PI / 180);
+        const theta = (lon + 180) * (Math.PI / 180);
+        const x = -radius * Math.sin(phi) * Math.cos(theta);
+        const y = radius * Math.cos(phi);
+        const z = radius * Math.sin(phi) * Math.sin(theta);
+        return new THREE.Vector3(x, y, z);
+      }
+
+      function createAttackLine(startPos, endPos, threatTypeIndex) {
+        const points = [];
+        const numPoints = 100;
+        const midPoint = new THREE.Vector3().copy(startPos).lerp(endPos, 0.5);
+        midPoint.setLength(EARTH_RADIUS * 1.5);
+
+        const curve = new THREE.QuadraticBezierCurve3(startPos, midPoint, endPos);
+        for (let i = 0; i <= numPoints; i++) {
+          points.push(curve.getPoint(i / numPoints));
+        }
+
+        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+        const material = new THREE.LineBasicMaterial({
+          color: new THREE.Color().setHSL(threatTypeIndex / THREAT_TYPES.length, 1.0, 0.5),
+          transparent: true,
+          opacity: 0
+        });
+
+        const line = new THREE.Line(geometry, material);
+        line.userData = {
+          startTime: performance.now(),
+          threatType: THREAT_TYPES[threatTypeIndex]
+        };
+        return line;
+      }
+
+      function addMessageToLog(sourceName, targetName, threatType, sourceIP, targetIP, asnInfo) {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message-log-item';
+        const timestamp = new Date().toLocaleTimeString();
+        messageDiv.innerHTML = `
+          <p class="log-timestamp">${timestamp}</p>
+          <p><span class="font-bold text-red-400">${threatType}</span> detected!</p>
+          <p class="text-xs">From: <span class="text-blue-300">${sourceIP}</span> (${sourceName})</p>
+          <p class="text-xs">ASN: <span class="text-yellow-300">${asnInfo.as || "N/A"}</span> - ${asnInfo.org || "Unknown"}</p>
+          <p class="text-xs">To: <span class="text-blue-300">${targetIP}</span> (${targetName})</p>
+        `;
+        messageLogElement.appendChild(messageDiv);
+      }
+
+      async function ipToGeoASN(ip) {
+        try {
+          const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,lat,lon,country,city,as,org,query`);
+          const data = await res.json();
+          if (data.status === "success") {
+            return {
+              ip: data.query,
+              lat: data.lat,
+              lon: data.lon,
+              city: data.city || "Unknown",
+              country: data.country,
+              as: data.as,
+              org: data.org
+            };
+          }
+        } catch (err) {
+          console.error("Geo+ASN lookup failed", err);
+        }
+        return null;
+      }
+
+      async function fetchAttackData() {
+        try {
+          const response = await fetch(OTX_URL, { headers: { "X-OTX-API-KEY": OTX_API_KEY } });
+          const data = await response.json();
+
+          const ips = [];
+          data.results.forEach(pulse => {
+            pulse.indicators.forEach(indicator => {
+              if (indicator.type === "IPv4") {
+                ips.push({ ip: indicator.indicator, threat: pulse.name });
+              }
+            });
+          });
+
+          for (let i = 0; i < Math.min(20, ips.length); i++) {
+            const source = await ipToGeoASN(ips[i].ip);
+            if (!source) continue;
+
+            // random target city for variety
+            const targets = [
+              { lat: 40.7128, lon: -74.0060, city: "New York", country: "USA" },
+              { lat: 51.5074, lon: -0.1278, city: "London", country: "UK" },
+              { lat: 35.6895, lon: 139.6917, city: "Tokyo", country: "Japan" },
+              { lat: 48.8566, lon: 2.3522, city: "Paris", country: "France" },
+              { lat: -33.8688, lon: 151.2093, city: "Sydney", country: "Australia" }
+            ];
+            const target = targets[Math.floor(Math.random() * targets.length)];
+
+            const startPos = latLonToVector3(source.lat, source.lon, EARTH_RADIUS);
+            const endPos = latLonToVector3(target.lat, target.lon, EARTH_RADIUS);
+            const threatTypeIndex = Math.floor(Math.random() * THREAT_TYPES.length);
+
+            const attack = createAttackLine(startPos, endPos, threatTypeIndex);
+            scene.add(attack);
+            attacks.push(attack);
+            totalAttacksCount++;
+
+            addMessageToLog(source.city, target.city, THREAT_TYPES[threatTypeIndex], source.ip, "target.net", source);
+
+            totalAttacksElement.textContent = totalAttacksCount;
+            activeAttacksElement.textContent = attacks.length;
+            await new Promise(r => setTimeout(r, 800)); // stagger
+          }
+        } catch (err) {
+          console.error("OTX fetch failed:", err);
+        }
+      }
+
+      function updateAttacks(currentTime) {
+        const completed = [];
+        attacks.forEach(attack => {
+          const elapsed = currentTime - attack.userData.startTime;
+          const progress = elapsed / ATTACK_DURATION;
+          if (progress >= 1) {
+            completed.push(attack);
+          } else {
+            attack.material.opacity = Math.sin(progress * Math.PI) * 0.8;
+          }
+        });
+        completed.forEach(a => {
+          scene.remove(a);
+          attacks.splice(attacks.indexOf(a), 1);
+        });
+        activeAttacksElement.textContent = attacks.length;
+      }
+
+      function init() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 400;
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const geometry = new THREE.SphereGeometry(EARTH_RADIUS, 64, 64);
+        const texture = new THREE.TextureLoader().load("https://threejs.org/examples/textures/land_ocean_ice_cloud_2048.jpg");
+        globe = new THREE.Mesh(geometry, new THREE.MeshPhongMaterial({ map: texture, shininess: 0.1 }));
+        scene.add(globe);
+
+        const ambientLight = new THREE.AmbientLight(0x404040, 2);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(5, 3, 5);
+        scene.add(directionalLight);
+
+        totalAttacksElement = document.getElementById('total-attacks');
+        activeAttacksElement = document.getElementById('active-attacks');
+        messageLogElement = document.getElementById('message-log');
+
+        animate();
+        fetchAttackData();
+        setInterval(fetchAttackData, 20000);
+      }
+
+      function animate() {
+        requestAnimationFrame(animate);
+        globe.rotation.y += 0.0005;
+        updateAttacks(performance.now());
+        renderer.render(scene, camera);
+      }
+
+      init();
+    }
+  </script>
+</body>
+</html>
