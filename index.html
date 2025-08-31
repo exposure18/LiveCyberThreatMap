@@ -85,7 +85,7 @@
       let totalAttacksCount = 0;
       let totalAttacksElement, activeAttacksElement, messageLogElement;
 
-      let autoRotate = true; // ✅ new flag for auto-rotation
+      let autoRotate = true; // ✅ auto-rotation flag
 
       const THREAT_TYPES = ['DDoS Attack', 'Phishing Attempt', 'Malware Injection', 'Botnet Activity', 'Port Scan'];
 
@@ -138,10 +138,14 @@
         messageLogElement.appendChild(messageDiv);
       }
 
+      // ✅ Fixed ipToGeoASN with CORS proxy
       async function ipToGeoASN(ip) {
         try {
-          const res = await fetch(`https://ipinfo.io/${ip}/json?token=${IPINFO_TOKEN}`);
+          const proxy = "https://corsproxy.io/?";
+          const url = `https://ipinfo.io/${ip}/json?token=${IPINFO_TOKEN}`;
+          const res = await fetch(proxy + url);
           const data = await res.json();
+
           if (data && data.loc) {
             const [lat, lon] = data.loc.split(",").map(Number);
             return {
